@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"fyne.io/fyne/v2"
@@ -54,6 +56,14 @@ func main() {
 	vlanValue := widget.NewLabel("-")
 	usernameValue := widget.NewLabel("-")
 	passwordValue := widget.NewLabel("-")
+	dnsValue := widget.NewLabel("-")
+	dnsValue.Wrapping = fyne.TextWrapWord
+	sniValue := widget.NewLabel("-")
+	sniValue.Wrapping = fyne.TextWrapWord
+	httpValue := widget.NewLabel("-")
+	httpValue.Wrapping = fyne.TextWrapWord
+	tr069Value := widget.NewLabel("-")
+	tr069Value.Wrapping = fyne.TextWrapWord
 
 	infoPanel := container.NewVBox(
 		widget.NewLabel("Router MAC"),
@@ -67,6 +77,15 @@ func main() {
 		widget.NewSeparator(),
 		widget.NewLabel("Password"),
 		passwordValue,
+		widget.NewSeparator(),
+		widget.NewLabel("DNS Lookups"),
+		dnsValue,
+		widget.NewSeparator(),
+		widget.NewLabel("HTTP Requests"),
+		httpValue,
+		widget.NewSeparator(),
+		widget.NewLabel("TR-069 Parameters"),
+		tr069Value,
 	)
 
 	var mu sync.Mutex
@@ -110,6 +129,26 @@ func main() {
 			usernameValue.SetText(creds.PeerID)
 			passwordValue.SetText(creds.Password)
 		}
+		if domains := session.DNSQueries(); len(domains) > 0 {
+			sort.Strings(domains)
+			dnsValue.SetText(strings.Join(domains, "\n"))
+		}
+		if reqs := session.HTTPRequests(); len(reqs) > 0 {
+			var lines []string
+			for _, r := range reqs {
+				line := r.String()
+				lines = append(lines, line)
+			}
+			httpValue.SetText(strings.Join(lines, "\n\n"))
+		}
+		if params := session.TR069Params(); len(params) > 0 {
+			var lines []string
+			for name, value := range params {
+				lines = append(lines, fmt.Sprintf("%s = %s", name, value))
+			}
+			sort.Strings(lines)
+			tr069Value.SetText(strings.Join(lines, "\n"))
+		}
 	}
 
 	resetInfo := func() {
@@ -117,6 +156,10 @@ func main() {
 		vlanValue.SetText("-")
 		usernameValue.SetText("-")
 		passwordValue.SetText("-")
+		dnsValue.SetText("-")
+		sniValue.SetText("-")
+		httpValue.SetText("-")
+		tr069Value.SetText("-")
 	}
 
 	var pppOnly bool
@@ -167,9 +210,15 @@ func main() {
 
 		session = NewSession(iface.HardwareAddr, capture)
 		session.OnStateChange = func(state SessionState) {
-			statusLabel.SetText(state.String())
+			fyne.Do(func() {
+				statusLabel.SetText(state.String())
+			})
 		}
-		session.OnUpdate = updateInfo
+		session.OnUpdate = func() {
+			fyne.Do(func() {
+				updateInfo()
+			})
+		}
 		session.Start()
 		if pppOnly {
 			capture.SetBPFFilter("pppoes or pppoed or (vlan and (pppoes or pppoed))")
@@ -190,11 +239,15 @@ func main() {
 				mu.Lock()
 				packets = append(packets, line)
 				mu.Unlock()
-				updateList()
+				fyne.Do(func() {
+					updateList()
+				})
 			}
-			startBtn.Enable()
-			dropdown.Enable()
-			stopBtn.Disable()
+			fyne.Do(func() {
+				startBtn.Enable()
+				dropdown.Enable()
+				stopBtn.Disable()
+			})
 		}()
 	}
 

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/binary"
 	"log"
 	"net"
@@ -64,17 +66,34 @@ type Session struct {
 	ipcpTheirAcked bool
 	ipcpOurSent    bool
 	assignedIP     net.IP
+	dnsQueries     map[string]struct{}
+	tcpConns       map[tcpConnKey]*tcpConn
+	httpRequests   []HTTPRequest
+	sniHosts       []string
+	ca             *x509.Certificate
+	caKey          *rsa.PrivateKey
+	certCache      *certCache
+	tr069Params    map[string]string
 	writer         PacketWriter
 	OnStateChange  func(SessionState)
 	OnUpdate       func()
 }
 
 func NewSession(ourMAC net.HardwareAddr, writer PacketWriter) *Session {
+	ca, caKey, err := generateCA()
+	if err != nil {
+		log.Printf("failed to generate CA: %v", err)
+	}
 	return &Session{
 		state:      StateIdle,
 		ourMAC:     ourMAC,
 		writer:     writer,
 		assignedIP: GenerateCGNATIP(),
+		dnsQueries: make(map[string]struct{}),
+		tcpConns:   make(map[tcpConnKey]*tcpConn),
+		ca:         ca,
+		caKey:      caKey,
+		certCache:  newCertCache(),
 	}
 }
 
@@ -140,6 +159,8 @@ func (s *Session) Start() {
 
 func (s *Session) HandlePacket(packet gopacket.Packet) {
 	s.handleEchoRequest(packet)
+	s.handleDNSQuery(packet)
+	s.handleTCPPacket(packet)
 
 	switch s.state {
 	case StateIdle:
@@ -407,4 +428,50 @@ func (s *Session) handleNegotiatingIPCP(packet gopacket.Packet) {
 	if s.ipcpOurAcked && s.ipcpTheirAcked {
 		s.setState(StateComplete)
 	}
+}
+
+func (s *Session) addHTTPRequest(req HTTPRequest) {
+	s.httpRequests = append(s.httpRequests, req)
+	s.notifyUpdate()
+}
+
+func (s *Session) addSNIHost(hostname string) {
+	for _, h := range s.sniHosts {
+		if h == hostname {
+			return
+		}
+	}
+	s.sniHosts = append(s.sniHosts, hostname)
+	s.notifyUpdate()
+}
+
+func (s *Session) HTTPRequests() []HTTPRequest {
+	result := make([]HTTPRequest, len(s.httpRequests))
+	copy(result, s.httpRequests)
+	return result
+}
+
+func (s *Session) SNIHosts() []string {
+	result := make([]string, len(s.sniHosts))
+	copy(result, s.sniHosts)
+	return result
+}
+
+func (s *Session) addTR069Params(params map[string]string) {
+	if s.tr069Params == nil {
+		s.tr069Params = make(map[string]string)
+	}
+	for k, v := range params {
+		s.tr069Params[k] = v
+		log.Printf("TR-069 param value: %s = %s", k, v)
+	}
+	s.notifyUpdate()
+}
+
+func (s *Session) TR069Params() map[string]string {
+	result := make(map[string]string, len(s.tr069Params))
+	for k, v := range s.tr069Params {
+		result[k] = v
+	}
+	return result
 }
