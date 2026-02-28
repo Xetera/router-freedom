@@ -4,50 +4,78 @@ import (
 	"fmt"
 	"net"
 	"slices"
+
+	"github.com/google/gopacket/pcap"
+)
+
+const (
+	pcapIfLoopback = 0x1
+	pcapIfUp       = 0x2
+	pcapIfRunning  = 0x4
 )
 
 type NetworkInterface struct {
 	Name         string
+	DisplayName  string
 	HardwareAddr net.HardwareAddr
-	Addresses    []net.Addr
-	Flags        net.Flags
+	Addresses    []string
 	MTU          int
+	Flags        uint32
+}
+
+func (ni NetworkInterface) Label() string {
+	if ni.DisplayName != "" {
+		return ni.DisplayName
+	}
+	return ni.Name
 }
 
 func (ni NetworkInterface) String() string {
-	return fmt.Sprintf("%s (%s)", ni.Name, ni.HardwareAddr)
+	if len(ni.HardwareAddr) > 0 {
+		return fmt.Sprintf("%s (%s)", ni.Label(), ni.HardwareAddr)
+	}
+	return ni.Label()
 }
 
 func ListPhysicalInterfaces() ([]NetworkInterface, error) {
-	ifaces, err := net.Interfaces()
+	devs, err := pcap.FindAllDevs()
 	if err != nil {
-		return nil, fmt.Errorf("listing interfaces: %w", err)
+		return nil, fmt.Errorf("listing pcap devices: %w", err)
 	}
 
+	netIfaces := netInterfaceMap()
+
 	var result []NetworkInterface
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if len(iface.HardwareAddr) == 0 {
-			continue
-		}
-		if iface.Flags&net.FlagUp == 0 {
+	for _, dev := range devs {
+		if dev.Flags&pcapIfLoopback != 0 {
 			continue
 		}
 
-		addrs, err := iface.Addrs()
-		if err != nil {
+		ni := NetworkInterface{
+			Name:  dev.Name,
+			Flags: dev.Flags,
+		}
+
+		if dev.Description != "" {
+			ni.DisplayName = dev.Description
+		}
+
+		for _, addr := range dev.Addresses {
+			if addr.IP != nil {
+				ni.Addresses = append(ni.Addresses, addr.IP.String())
+			}
+		}
+
+		if info, ok := netIfaces[dev.Name]; ok {
+			ni.HardwareAddr = info.mac
+			ni.MTU = info.mtu
+		}
+
+		if len(ni.HardwareAddr) == 0 && len(ni.Addresses) == 0 {
 			continue
 		}
 
-		result = append(result, NetworkInterface{
-			Name:         iface.Name,
-			HardwareAddr: iface.HardwareAddr,
-			Addresses:    addrs,
-			Flags:        iface.Flags,
-			MTU:          iface.MTU,
-		})
+		result = append(result, ni)
 	}
 
 	slices.Reverse(result)
@@ -55,14 +83,35 @@ func ListPhysicalInterfaces() ([]NetworkInterface, error) {
 	return result, nil
 }
 
-func InterfaceRunningSet() map[string]bool {
+type netIfaceInfo struct {
+	mac net.HardwareAddr
+	mtu int
+}
+
+func netInterfaceMap() map[string]*netIfaceInfo {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
-	running := make(map[string]bool, len(ifaces))
+	m := make(map[string]*netIfaceInfo, len(ifaces))
 	for _, iface := range ifaces {
-		running[iface.Name] = iface.Flags&net.FlagRunning != 0
+		info := &netIfaceInfo{
+			mac: iface.HardwareAddr,
+			mtu: iface.MTU,
+		}
+		m[iface.Name] = info
+	}
+	return m
+}
+
+func InterfaceRunningSet() map[string]bool {
+	devs, err := pcap.FindAllDevs()
+	if err != nil {
+		return nil
+	}
+	running := make(map[string]bool, len(devs))
+	for _, dev := range devs {
+		running[dev.Name] = dev.Flags&pcapIfRunning != 0
 	}
 	return running
 }

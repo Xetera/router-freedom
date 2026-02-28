@@ -21,11 +21,15 @@ import (
 var ifaceColumnWidths = []float32{80, 160, 60, 300}
 
 func ifaceRow(iface NetworkInterface) []string {
-	addrs := make([]string, len(iface.Addresses))
-	for i, a := range iface.Addresses {
-		addrs[i] = a.String()
+	mac := ""
+	if len(iface.HardwareAddr) > 0 {
+		mac = iface.HardwareAddr.String()
 	}
-	return []string{iface.Name, iface.HardwareAddr.String(), fmt.Sprintf("%d", iface.MTU), strings.Join(addrs, ", ")}
+	mtu := ""
+	if iface.MTU > 0 {
+		mtu = fmt.Sprintf("%d", iface.MTU)
+	}
+	return []string{iface.Label(), mac, mtu, strings.Join(iface.Addresses, ", ")}
 }
 
 func ifaceRowContainer(bold bool) (*fyne.Container, []*widget.Label) {
@@ -189,7 +193,7 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 }
 
 func buildCaptureScreen(w fyne.Window, iface NetworkInterface, onBack func()) fyne.CanvasObject {
-	w.SetTitle(fmt.Sprintf("Router Freedom — %s", iface.Name))
+	w.SetTitle(fmt.Sprintf("Router Freedom — %s", iface.Label()))
 	packetList := widget.NewList(
 		func() int { return 0 },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
@@ -405,7 +409,7 @@ func buildCaptureScreen(w fyne.Window, iface NetworkInterface, onBack func()) fy
 	})
 	backBtn.SetIcon(theme.NavigateBackIcon())
 
-	ifaceLabel := widget.NewLabel(iface.Name)
+	ifaceLabel := widget.NewLabel(iface.Label())
 	ifaceLabel.TextStyle.Bold = true
 
 	startCapture()
