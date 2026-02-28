@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"image/color"
 	"sort"
@@ -18,7 +19,33 @@ import (
 	"github.com/google/gopacket"
 )
 
-var ifaceColumnWidths = []float32{80, 160, 60, 300}
+//go:embed lanwan.jpg
+var lanwanJPG []byte
+
+//go:embed ethernet.svg
+var ethernetSVG []byte
+
+//go:embed usb.svg
+var usbSVG []byte
+
+var themedSVGCache sync.Map
+
+func themedSVG(name string, src []byte, c color.Color) *fyne.StaticResource {
+	r, g, b, _ := c.RGBA()
+	hex := fmt.Sprintf("#%02x%02x%02x", uint8(r>>8), uint8(g>>8), uint8(b>>8))
+	key := name + hex
+	if v, ok := themedSVGCache.Load(key); ok {
+		return v.(*fyne.StaticResource)
+	}
+	out := strings.Replace(string(src), "currentColor", hex, -1)
+	res := fyne.NewStaticResource(key+".svg", []byte(out))
+	themedSVGCache.Store(key, res)
+	return res
+}
+
+var ifaceColumnWidths = []float32{40, 80, 160, 60, 300}
+
+var textColumnWidths = ifaceColumnWidths[1:]
 
 func ifaceRow(iface NetworkInterface) []string {
 	mac := ""
@@ -45,9 +72,17 @@ func ifaceRowContainer(bold bool) (*fyne.Container, []*widget.Label) {
 }
 
 var (
-	disabledColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
-	newIfaceColor = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
+	disabledColor  = color.NRGBA{R: 80, G: 80, B: 80, A: 255}
+	newIfaceColor  = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
+	iconColor      = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
+	separatorColor = color.NRGBA{R: 255, G: 255, B: 255, A: 10}
 )
+
+func softSeparator() fyne.CanvasObject {
+	r := canvas.NewRectangle(separatorColor)
+	r.SetMinSize(fyne.NewSize(0, 1))
+	return r
+}
 
 type ifaceState struct {
 	mu         sync.Mutex
@@ -72,13 +107,15 @@ func newIfaceState(ifaces []NetworkInterface) *ifaceState {
 
 func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(NetworkInterface)) fyne.CanvasObject {
 	header, headerLabels := ifaceRowContainer(true)
-	for i, text := range []string{"Name", "MAC", "MTU", "Addresses"} {
+	for i, text := range []string{"", "Name", "MAC", "MTU", "Addresses"} {
 		headerLabels[i].SetText(text)
 	}
 
 	fgColor := func() color.Color {
 		return theme.Color(theme.ColorNameForeground)
 	}
+
+	iconSize := fyne.NewSize(ifaceColumnWidths[0], 36)
 
 	list := widget.NewList(
 		func() int {
@@ -87,11 +124,13 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 			return len(state.ifaces)
 		},
 		func() fyne.CanvasObject {
-			labels := make([]fyne.CanvasObject, len(ifaceColumnWidths))
-			for i, w := range ifaceColumnWidths {
-				labels[i] = container.NewGridWrap(fyne.NewSize(w, 36), container.NewPadded(canvas.NewText("", fgColor())))
+			icon := canvas.NewImageFromResource(themedSVG("ethernet", ethernetSVG, iconColor))
+			icon.FillMode = canvas.ImageFillContain
+			cols := []fyne.CanvasObject{container.NewGridWrap(iconSize, icon)}
+			for _, w := range textColumnWidths {
+				cols = append(cols, container.NewGridWrap(fyne.NewSize(w, 36), container.NewPadded(canvas.NewText("", fgColor()))))
 			}
-			return container.NewHBox(labels...)
+			return container.NewHBox(cols...)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			row := obj.(*fyne.Container)
@@ -104,6 +143,28 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 			active := state.running[iface.Name]
 			isNew := state.newNames[iface.Name]
 			state.mu.Unlock()
+
+			icon := row.Objects[0].(*fyne.Container).Objects[0].(*canvas.Image)
+			var iconName string
+			var iconSrc []byte
+			if iface.TransportType == "usb" {
+				iconName = "usb"
+				iconSrc = usbSVG
+			} else {
+				iconName = "ethernet"
+				iconSrc = ethernetSVG
+			}
+			var ic color.Color
+			if !active && !isNew {
+				ic = disabledColor
+			} else if isNew {
+				ic = newIfaceColor
+			} else {
+				ic = iconColor
+			}
+			icon.Resource = themedSVG(iconName, iconSrc, ic)
+			icon.Refresh()
+
 			values := ifaceRow(iface)
 			if isNew {
 				values[3] = "new interface connected"
@@ -111,17 +172,17 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 				values[3] = "disconnected"
 			}
 			for i, val := range values {
-				text := row.Objects[i].(*fyne.Container).Objects[0].(*fyne.Container).Objects[0].(*canvas.Text)
+				text := row.Objects[i+1].(*fyne.Container).Objects[0].(*fyne.Container).Objects[0].(*canvas.Text)
 				text.Text = val
 				if isNew {
 					text.Color = newIfaceColor
 					text.TextStyle.Italic = false
-				} else if active {
-					text.Color = fgColor()
-					text.TextStyle.Italic = false
-				} else {
+				} else if !active {
 					text.Color = disabledColor
 					text.TextStyle.Italic = true
+				} else {
+					text.Color = fgColor()
+					text.TextStyle.Italic = false
 				}
 				text.Refresh()
 			}
@@ -188,7 +249,14 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 	)
 	instructions.Wrapping = fyne.TextWrapWord
 
-	top := container.NewVBox(instructions, header)
+	lanwanRes := fyne.NewStaticResource("lanwan.jpg", lanwanJPG)
+	lanwanImg := canvas.NewImageFromResource(lanwanRes)
+	lanwanImg.FillMode = canvas.ImageFillContain
+	lanwanImg.SetMinSize(fyne.NewSize(200, 150))
+
+	instructionsRow := container.NewBorder(nil, nil, nil, lanwanImg, instructions)
+
+	top := container.NewVBox(instructionsRow, header)
 	return container.NewBorder(top, nil, nil, nil, list)
 }
 
@@ -232,29 +300,34 @@ func buildCaptureScreen(w fyne.Window, iface NetworkInterface, onBack func()) fy
 
 	var session *Session
 	var forwarding bool
-	forwardCheck := widget.NewCheck("Forward traffic", func(checked bool) {
+	forwardCheck := widget.NewCheck("Relay traffic", func(checked bool) {
 		forwarding = checked
 		if session != nil {
 			session.Forwarding = checked
 		}
 	})
-	forwardExplain := widget.NewLabel("Forward UDP and TCP traffic from the router to the internet.\nThis is not required for grabbing credentials but can help you observe what your router is doing after \"successful\" logins.")
+	forwardExplain := widget.NewLabel(
+		"Relay UDP and TCP traffic from the router to the internet and back. This is not required for grabbing credentials.",
+	)
 	forwardExplain.Wrapping = fyne.TextWrapWord
 
-	infoPanel := container.NewVBox(
-		forwardCheck,
-		forwardExplain,
-		widget.NewSeparator(),
+	infoPanelTop := container.NewVBox(
 		fieldRow("Router MAC", macValue),
-		widget.NewSeparator(),
+		softSeparator(),
 		fieldRow("VLAN Configuration", vlanValue),
-		widget.NewSeparator(),
+		softSeparator(),
 		fieldRow("PPPoE Username", usernameValue),
-		widget.NewSeparator(),
+		softSeparator(),
 		fieldRow("PPPoE Password", passwordValue),
-		widget.NewSeparator(),
+		softSeparator(),
 		fieldRow("DNS Lookups", dnsValue),
 	)
+	infoPanelBottom := container.NewVBox(
+		softSeparator(),
+		forwardCheck,
+		forwardExplain,
+	)
+	infoPanel := container.NewBorder(infoPanelTop, infoPanelBottom, nil, nil)
 
 	var mu sync.Mutex
 	var packets []string
@@ -420,8 +493,20 @@ func buildCaptureScreen(w fyne.Window, iface NetworkInterface, onBack func()) fy
 	return container.NewBorder(toolbar, nil, nil, nil, split)
 }
 
+type appTheme struct {
+	fyne.Theme
+}
+
+func (t *appTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	if name == theme.ColorNameSeparator {
+		return separatorColor
+	}
+	return t.Theme.Color(name, variant)
+}
+
 func main() {
 	a := app.New()
+	a.Settings().SetTheme(&appTheme{Theme: a.Settings().Theme()})
 	w := a.NewWindow("Router Freedom")
 	w.Resize(fyne.NewSize(900, 600))
 

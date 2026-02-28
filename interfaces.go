@@ -15,12 +15,13 @@ const (
 )
 
 type NetworkInterface struct {
-	Name         string
-	DisplayName  string
-	HardwareAddr net.HardwareAddr
-	Addresses    []string
-	MTU          int
-	Flags        uint32
+	Name          string
+	DisplayName   string
+	HardwareAddr  net.HardwareAddr
+	Addresses     []string
+	MTU           int
+	Flags         uint32
+	TransportType string
 }
 
 func (ni NetworkInterface) Label() string {
@@ -79,6 +80,7 @@ func ListPhysicalInterfaces() ([]NetworkInterface, error) {
 	}
 
 	slices.Reverse(result)
+	classifyInterfaces(result)
 
 	return result, nil
 }
