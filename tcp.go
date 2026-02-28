@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"sync"
@@ -26,12 +27,13 @@ const (
 )
 
 type tcpConn struct {
-	mu       sync.Mutex
-	state    tcpConnState
-	ourSeq   uint32
-	theirSeq uint32
-	pipe     net.Conn
-	lastSeen time.Time
+	mu          sync.Mutex
+	state       tcpConnState
+	ourSeq      uint32
+	theirSeq    uint32
+	pipe        net.Conn
+	pendingData []byte
+	lastSeen    time.Time
 }
 
 func keyFromPacket(ip *layers.IPv4, tcp *layers.TCP) tcpConnKey {
@@ -44,7 +46,7 @@ func keyFromPacket(ip *layers.IPv4, tcp *layers.TCP) tcpConnKey {
 }
 
 func (s *Session) handleTCPPacket(packet gopacket.Packet) {
-	if s.sessionID == 0 {
+	if s.sessionID == 0 || !s.Forwarding {
 		return
 	}
 
@@ -59,10 +61,6 @@ func (s *Session) handleTCPPacket(packet gopacket.Packet) {
 		return
 	}
 	tcp := tcpLayer.(*layers.TCP)
-
-	if tcp.DstPort != 443 {
-		return
-	}
 
 	key := keyFromPacket(ip, tcp)
 
@@ -85,10 +83,48 @@ func (s *Session) handleTCPPacket(packet gopacket.Packet) {
 
 	if tcp.ACK && conn.state == tcpStateSynReceived {
 		conn.state = tcpStateEstablished
-		pipeClient, pipeServer := net.Pipe()
-		conn.pipe = pipeClient
-		go s.handleTLS(pipeServer)
-		go s.startTCPWriter(key, pipeClient)
+
+		payload := make([]byte, len(tcp.Payload))
+		copy(payload, tcp.Payload)
+		if len(payload) > 0 {
+			conn.theirSeq = tcp.Seq + uint32(len(payload))
+			s.sendTCPAck(key, conn, ip, tcp, uint32(len(payload)))
+		}
+
+		dstIP := make(net.IP, len(ip.DstIP))
+		copy(dstIP, ip.DstIP)
+		srcIP := make(net.IP, len(ip.SrcIP))
+		copy(srcIP, ip.SrcIP)
+		dstPort := tcp.DstPort
+		srcPort := tcp.SrcPort
+
+		go func() {
+			dst := fmt.Sprintf("%s:%d", dstIP, dstPort)
+			upstream, err := net.DialTimeout("tcp", dst, 10*time.Second)
+			if err != nil {
+				log.Printf("failed to dial upstream %s: %v", dst, err)
+				conn.mu.Lock()
+				s.sendTCPPacket(dstIP, srcIP, dstPort, srcPort, conn.ourSeq, conn.theirSeq, false, false, false, true, nil)
+				conn.mu.Unlock()
+				s.closeTCPConn(key)
+				return
+			}
+
+			conn.mu.Lock()
+			conn.pipe = upstream
+			if len(payload) > 0 {
+				upstream.Write(payload)
+			}
+			if len(conn.pendingData) > 0 {
+				upstream.Write(conn.pendingData)
+				conn.pendingData = nil
+			}
+			conn.mu.Unlock()
+
+			s.startTCPWriter(key, upstream)
+		}()
+		conn.mu.Unlock()
+		return
 	}
 
 	payload := tcp.Payload
@@ -96,6 +132,8 @@ func (s *Session) handleTCPPacket(packet gopacket.Packet) {
 		conn.theirSeq = tcp.Seq + uint32(len(payload))
 		if conn.pipe != nil {
 			conn.pipe.Write(payload)
+		} else {
+			conn.pendingData = append(conn.pendingData, payload...)
 		}
 		s.sendTCPAck(key, conn, ip, tcp, uint32(len(payload)))
 	}
@@ -214,10 +252,10 @@ func (s *Session) sendTCPData(key tcpConnKey, data []byte) {
 	}
 }
 
-func (s *Session) startTCPWriter(key tcpConnKey, pipeRead net.Conn) {
+func (s *Session) startTCPWriter(key tcpConnKey, upstream net.Conn) {
 	buf := make([]byte, 4096)
 	for {
-		n, err := pipeRead.Read(buf)
+		n, err := upstream.Read(buf)
 		if n > 0 {
 			segment := make([]byte, n)
 			copy(segment, buf[:n])
@@ -228,4 +266,3 @@ func (s *Session) startTCPWriter(key tcpConnKey, pipeRead net.Conn) {
 		}
 	}
 }
-

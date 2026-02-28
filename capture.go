@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/gopacket"
@@ -29,8 +30,10 @@ type PacketWriter interface {
 }
 
 type CaptureHandle struct {
-	handle *pcap.Handle
-	cancel context.CancelFunc
+	mu      sync.Mutex
+	handle  *pcap.Handle
+	closed  bool
+	cancel  context.CancelFunc
 }
 
 func StartCapture(ctx context.Context, ifaceName string, snapshotLen int32, promiscuous bool) (*CaptureHandle, <-chan gopacket.Packet, error) {
@@ -77,10 +80,18 @@ func StartCapture(ctx context.Context, ifaceName string, snapshotLen int32, prom
 }
 
 func (ch *CaptureHandle) WritePacketData(data []byte) error {
+	ch.mu.Lock()
+	defer ch.mu.Unlock()
+	if ch.closed {
+		return fmt.Errorf("capture handle closed")
+	}
 	return ch.handle.WritePacketData(data)
 }
 
 func (ch *CaptureHandle) Stop() {
+	ch.mu.Lock()
+	ch.closed = true
+	ch.mu.Unlock()
 	ch.cancel()
 }
 

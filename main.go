@@ -3,47 +3,193 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/google/gopacket"
 )
 
-func main() {
-	a := app.New()
-	w := a.NewWindow("Router Freedom")
-	w.Resize(fyne.NewSize(900, 600))
+var ifaceColumnWidths = []float32{80, 160, 60, 300}
 
-	ifaces, err := ListPhysicalInterfaces()
-	if err != nil {
-		w.SetContent(widget.NewLabel(fmt.Sprintf("Error listing interfaces: %v", err)))
-		w.ShowAndRun()
-		return
+func ifaceRow(iface NetworkInterface) []string {
+	addrs := make([]string, len(iface.Addresses))
+	for i, a := range iface.Addresses {
+		addrs[i] = a.String()
+	}
+	return []string{iface.Name, iface.HardwareAddr.String(), fmt.Sprintf("%d", iface.MTU), strings.Join(addrs, ", ")}
+}
+
+func ifaceRowContainer(bold bool) (*fyne.Container, []*widget.Label) {
+	labels := make([]*widget.Label, len(ifaceColumnWidths))
+	objects := make([]fyne.CanvasObject, len(ifaceColumnWidths))
+	for i, w := range ifaceColumnWidths {
+		l := widget.NewLabel("")
+		l.TextStyle.Bold = bold
+		labels[i] = l
+		objects[i] = container.NewGridWrap(fyne.NewSize(w, 36), l)
+	}
+	return container.NewHBox(objects...), labels
+}
+
+var (
+	disabledColor = color.NRGBA{R: 128, G: 128, B: 128, A: 255}
+	newIfaceColor = color.NRGBA{R: 100, G: 180, B: 255, A: 255}
+)
+
+type ifaceState struct {
+	mu         sync.Mutex
+	ifaces     []NetworkInterface
+	running    map[string]bool
+	knownNames map[string]bool
+	newNames   map[string]bool
+}
+
+func newIfaceState(ifaces []NetworkInterface) *ifaceState {
+	known := make(map[string]bool, len(ifaces))
+	for _, iface := range ifaces {
+		known[iface.Name] = true
+	}
+	return &ifaceState{
+		ifaces:     ifaces,
+		running:    InterfaceRunningSet(),
+		knownNames: known,
+		newNames:   make(map[string]bool),
+	}
+}
+
+func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(NetworkInterface)) fyne.CanvasObject {
+	header, headerLabels := ifaceRowContainer(true)
+	for i, text := range []string{"Name", "MAC", "MTU", "Addresses"} {
+		headerLabels[i].SetText(text)
 	}
 
-	ifaceNames := make([]string, len(ifaces))
-	for i, iface := range ifaces {
-		ifaceNames[i] = iface.String()
+	fgColor := func() color.Color {
+		return theme.Color(theme.ColorNameForeground)
 	}
 
-	var selectedIdx int
-	dropdown := widget.NewSelect(ifaceNames, func(value string) {
-		for i, name := range ifaceNames {
-			if name == value {
-				selectedIdx = i
-				break
+	list := widget.NewList(
+		func() int {
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			return len(state.ifaces)
+		},
+		func() fyne.CanvasObject {
+			labels := make([]fyne.CanvasObject, len(ifaceColumnWidths))
+			for i, w := range ifaceColumnWidths {
+				labels[i] = container.NewGridWrap(fyne.NewSize(w, 36), container.NewPadded(canvas.NewText("", fgColor())))
+			}
+			return container.NewHBox(labels...)
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			row := obj.(*fyne.Container)
+			state.mu.Lock()
+			if id >= len(state.ifaces) {
+				state.mu.Unlock()
+				return
+			}
+			iface := state.ifaces[id]
+			active := state.running[iface.Name]
+			isNew := state.newNames[iface.Name]
+			state.mu.Unlock()
+			values := ifaceRow(iface)
+			if isNew {
+				values[3] = "new interface connected"
+			} else if !active {
+				values[3] = "disconnected"
+			}
+			for i, val := range values {
+				text := row.Objects[i].(*fyne.Container).Objects[0].(*fyne.Container).Objects[0].(*canvas.Text)
+				text.Text = val
+				if isNew {
+					text.Color = newIfaceColor
+					text.TextStyle.Italic = false
+				} else if active {
+					text.Color = fgColor()
+					text.TextStyle.Italic = false
+				} else {
+					text.Color = disabledColor
+					text.TextStyle.Italic = true
+				}
+				text.Refresh()
+			}
+		},
+	)
+	list.OnSelected = func(id widget.ListItemID) {
+		state.mu.Lock()
+		if id >= len(state.ifaces) {
+			state.mu.Unlock()
+			list.UnselectAll()
+			return
+		}
+		iface := state.ifaces[id]
+		active := state.running[iface.Name]
+		state.mu.Unlock()
+		if !active {
+			list.UnselectAll()
+			return
+		}
+		onSelect(iface)
+	}
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				fresh, err := ListPhysicalInterfaces()
+				if err != nil {
+					continue
+				}
+				freshRunning := InterfaceRunningSet()
+				state.mu.Lock()
+				for _, fi := range fresh {
+					if !state.knownNames[fi.Name] {
+						state.knownNames[fi.Name] = true
+						state.newNames[fi.Name] = true
+						state.ifaces = append([]NetworkInterface{fi}, state.ifaces...)
+					}
+				}
+				state.running = freshRunning
+				state.mu.Unlock()
+				fyne.Do(func() {
+					list.Refresh()
+				})
 			}
 		}
-	})
-	if len(ifaceNames) > 0 {
-		dropdown.SetSelectedIndex(0)
-	}
+	}()
 
+	instructions := widget.NewRichText(
+		&widget.TextSegment{Text: "Usage", Style: widget.RichTextStyleHeading},
+		&widget.TextSegment{Text: "To grab your router's credentials:", Style: widget.RichTextStyleParagraph},
+		&widget.ListSegment{Ordered: true, Items: []widget.RichTextSegment{
+			&widget.TextSegment{Text: "Plug in your router but keep it turned off for now"},
+			&widget.TextSegment{Text: "Connect an ethernet cable to the WAN port of your router and the other end to your computer. If you're on a laptop or don't have an ethernet port, you can pick up any cheap ethernet-to-usb cable and it should work fine"},
+			&widget.TextSegment{Text: "You should see a new interface pop up below in blue"},
+			&widget.TextSegment{Text: "Click on the interface and power your router on. It's normal to wait up to 1-2 minutes for the router to come to life"},
+			&widget.TextSegment{Text: "If your router uses PPPoE the MAC address, VLAN configuration and PPPoE username and password should show up"},
+		}},
+		&widget.TextSegment{Text: "If you get a \"router refuses insecure auth\" error, contact me at hi@xetera.dev to see if we can crack the hash. If not, I'm happy to give you a refund if you're willing to share your router model and ISP.", Style: widget.RichTextStyleParagraph},
+	)
+	instructions.Wrapping = fyne.TextWrapWord
+
+	top := container.NewVBox(instructions, header)
+	return container.NewBorder(top, nil, nil, nil, list)
+}
+
+func buildCaptureScreen(w fyne.Window, iface NetworkInterface, onBack func()) fyne.CanvasObject {
+	w.SetTitle(fmt.Sprintf("Router Freedom — %s", iface.Name))
 	packetList := widget.NewList(
 		func() int { return 0 },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
@@ -58,40 +204,57 @@ func main() {
 	passwordValue := widget.NewLabel("-")
 	dnsValue := widget.NewLabel("-")
 	dnsValue.Wrapping = fyne.TextWrapWord
-	sniValue := widget.NewLabel("-")
-	sniValue.Wrapping = fyne.TextWrapWord
-	httpValue := widget.NewLabel("-")
-	httpValue.Wrapping = fyne.TextWrapWord
-	tr069Value := widget.NewLabel("-")
-	tr069Value.Wrapping = fyne.TextWrapWord
+
+	type copyField struct {
+		label *widget.Label
+		btn   *widget.Button
+	}
+
+	var copyFields []*copyField
+
+	fieldRow := func(label string, val *widget.Label) *fyne.Container {
+		btn := widget.NewButton("Copy", func() {
+			w.Clipboard().SetContent(val.Text)
+		})
+		btn.Importance = widget.LowImportance
+		btn.SetIcon(theme.ContentCopyIcon())
+		btn.Disable()
+		copyFields = append(copyFields, &copyField{label: val, btn: btn})
+		return container.NewVBox(
+			container.NewHBox(widget.NewLabel(label), btn),
+			val,
+		)
+	}
+
+	var session *Session
+	var forwarding bool
+	forwardCheck := widget.NewCheck("Forward traffic", func(checked bool) {
+		forwarding = checked
+		if session != nil {
+			session.Forwarding = checked
+		}
+	})
+	forwardExplain := widget.NewLabel("Forward UDP and TCP traffic from the router to the internet.\nThis is not required for grabbing credentials but can help you observe what your router is doing after \"successful\" logins.")
+	forwardExplain.Wrapping = fyne.TextWrapWord
 
 	infoPanel := container.NewVBox(
-		widget.NewLabel("Router MAC"),
-		macValue,
+		forwardCheck,
+		forwardExplain,
 		widget.NewSeparator(),
-		widget.NewLabel("VLAN"),
-		vlanValue,
+		fieldRow("Router MAC", macValue),
 		widget.NewSeparator(),
-		widget.NewLabel("Username"),
-		usernameValue,
+		fieldRow("VLAN Configuration", vlanValue),
 		widget.NewSeparator(),
-		widget.NewLabel("Password"),
-		passwordValue,
+		fieldRow("PPPoE Username", usernameValue),
 		widget.NewSeparator(),
-		widget.NewLabel("DNS Lookups"),
-		dnsValue,
+		fieldRow("PPPoE Password", passwordValue),
 		widget.NewSeparator(),
-		widget.NewLabel("HTTP Requests"),
-		httpValue,
-		widget.NewSeparator(),
-		widget.NewLabel("TR-069 Parameters"),
-		tr069Value,
+		fieldRow("DNS Lookups", dnsValue),
 	)
 
 	var mu sync.Mutex
 	var packets []string
 	var capture *CaptureHandle
-	var session *Session
 
 	updateList := func() {
 		mu.Lock()
@@ -108,6 +271,16 @@ func main() {
 		packetList.Refresh()
 		if count > 0 {
 			packetList.ScrollToBottom()
+		}
+	}
+
+	refreshCopyButtons := func() {
+		for _, cf := range copyFields {
+			if cf.label.Text != "" && cf.label.Text != "-" {
+				cf.btn.Enable()
+			} else {
+				cf.btn.Disable()
+			}
 		}
 	}
 
@@ -133,22 +306,7 @@ func main() {
 			sort.Strings(domains)
 			dnsValue.SetText(strings.Join(domains, "\n"))
 		}
-		if reqs := session.HTTPRequests(); len(reqs) > 0 {
-			var lines []string
-			for _, r := range reqs {
-				line := r.String()
-				lines = append(lines, line)
-			}
-			httpValue.SetText(strings.Join(lines, "\n\n"))
-		}
-		if params := session.TR069Params(); len(params) > 0 {
-			var lines []string
-			for name, value := range params {
-				lines = append(lines, fmt.Sprintf("%s = %s", name, value))
-			}
-			sort.Strings(lines)
-			tr069Value.SetText(strings.Join(lines, "\n"))
-		}
+		refreshCopyButtons()
 	}
 
 	resetInfo := func() {
@@ -157,45 +315,30 @@ func main() {
 		usernameValue.SetText("-")
 		passwordValue.SetText("-")
 		dnsValue.SetText("-")
-		sniValue.SetText("-")
-		httpValue.SetText("-")
-		tr069Value.SetText("-")
+		refreshCopyButtons()
 	}
 
-	var pppOnly bool
-	pppFilterBtn := widget.NewButton("PPP Only: Off", nil)
-	pppFilterBtn.OnTapped = func() {
-		pppOnly = !pppOnly
-		if pppOnly {
-			pppFilterBtn.SetText("PPP Only: On")
-		} else {
-			pppFilterBtn.SetText("PPP Only: Off")
-		}
+	toggleBtn := widget.NewButton("Stop Capture", nil)
+	var capturing bool
+
+	stopCapture := func() {
 		if capture != nil {
-			filter := ""
-			if pppOnly {
-				filter = "pppoes or pppoed or (vlan and (pppoes or pppoed))"
-			}
-			capture.SetBPFFilter(filter)
+			capture.Stop()
+			capture = nil
 		}
+		capturing = false
+		statusLabel.SetText(StateIdle.String())
+		toggleBtn.SetText("Start Capture")
 	}
 
-	startBtn := widget.NewButton("Start Capture", nil)
-	stopBtn := widget.NewButton("Stop Capture", nil)
-	stopBtn.Disable()
-
-	startBtn.OnTapped = func() {
-		if len(ifaces) == 0 {
-			return
-		}
-
+	startCapture := func() {
 		mu.Lock()
 		packets = nil
 		mu.Unlock()
+		session = nil
 		updateList()
 		resetInfo()
 
-		iface := ifaces[selectedIdx]
 		ctx := context.Background()
 		var packetChan <-chan gopacket.Packet
 		var err error
@@ -208,7 +351,11 @@ func main() {
 			return
 		}
 
+		capturing = true
+		toggleBtn.SetText("Stop Capture")
+
 		session = NewSession(iface.HardwareAddr, capture)
+		session.Forwarding = forwarding
 		session.OnStateChange = func(state SessionState) {
 			fyne.Do(func() {
 				statusLabel.SetText(state.String())
@@ -220,17 +367,10 @@ func main() {
 			})
 		}
 		session.Start()
-		if pppOnly {
-			capture.SetBPFFilter("pppoes or pppoed or (vlan and (pppoes or pppoed))")
-		}
 
-		startBtn.Disable()
-		dropdown.Disable()
-		stopBtn.Enable()
-
-		go func() {
+		go func(s *Session) {
 			for packet := range packetChan {
-				session.HandlePacket(packet)
+				s.HandlePacket(packet)
 				summary := summarizePacket(packet)
 				if summary.Protocol == "UDP" {
 					continue
@@ -244,27 +384,70 @@ func main() {
 				})
 			}
 			fyne.Do(func() {
-				startBtn.Enable()
-				dropdown.Enable()
-				stopBtn.Disable()
+				capturing = false
+				toggleBtn.SetText("Start Capture")
 			})
-		}()
+		}(session)
 	}
 
-	stopBtn.OnTapped = func() {
-		if capture != nil {
-			capture.Stop()
-			capture = nil
+	toggleBtn.OnTapped = func() {
+		if capturing {
+			stopCapture()
+		} else {
+			startCapture()
 		}
-		session = nil
-		resetInfo()
-		statusLabel.SetText(StateIdle.String())
 	}
 
-	toolbar := container.NewHBox(dropdown, startBtn, stopBtn, pppFilterBtn, statusLabel)
+	backBtn := widget.NewButton("Back", func() {
+		stopCapture()
+		w.SetTitle("Router Freedom")
+		onBack()
+	})
+	backBtn.SetIcon(theme.NavigateBackIcon())
+
+	ifaceLabel := widget.NewLabel(iface.Name)
+	ifaceLabel.TextStyle.Bold = true
+
+	startCapture()
+
+	toolbar := container.NewHBox(backBtn, ifaceLabel, toggleBtn, statusLabel)
 	split := container.NewHSplit(packetList, infoPanel)
 	split.SetOffset(0.66)
-	content := container.NewBorder(toolbar, nil, nil, nil, split)
-	w.SetContent(content)
+	return container.NewBorder(toolbar, nil, nil, nil, split)
+}
+
+func main() {
+	a := app.New()
+	w := a.NewWindow("Router Freedom")
+	w.Resize(fyne.NewSize(900, 600))
+
+	ifaces, err := ListPhysicalInterfaces()
+	if err != nil {
+		w.SetContent(widget.NewLabel(fmt.Sprintf("Error listing interfaces: %v", err)))
+		w.ShowAndRun()
+		return
+	}
+
+	state := newIfaceState(ifaces)
+
+	var cancelLanding context.CancelFunc
+	var showLanding func()
+	showLanding = func() {
+		if cancelLanding != nil {
+			cancelLanding()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelLanding = cancel
+		landing := buildLandingPage(ctx, state, func(iface NetworkInterface) {
+			cancel()
+			captureScreen := buildCaptureScreen(w, iface, func() {
+				showLanding()
+			})
+			w.SetContent(captureScreen)
+		})
+		w.SetContent(landing)
+	}
+
+	showLanding()
 	w.ShowAndRun()
 }

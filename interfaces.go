@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"slices"
 )
 
 type NetworkInterface struct {
@@ -10,6 +11,7 @@ type NetworkInterface struct {
 	HardwareAddr net.HardwareAddr
 	Addresses    []net.Addr
 	Flags        net.Flags
+	MTU          int
 }
 
 func (ni NetworkInterface) String() string {
@@ -44,8 +46,23 @@ func ListPhysicalInterfaces() ([]NetworkInterface, error) {
 			HardwareAddr: iface.HardwareAddr,
 			Addresses:    addrs,
 			Flags:        iface.Flags,
+			MTU:          iface.MTU,
 		})
 	}
 
+	slices.Reverse(result)
+
 	return result, nil
+}
+
+func InterfaceRunningSet() map[string]bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	running := make(map[string]bool, len(ifaces))
+	for _, iface := range ifaces {
+		running[iface.Name] = iface.Flags&net.FlagRunning != 0
+	}
+	return running
 }
