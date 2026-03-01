@@ -45,6 +45,7 @@ func ListPhysicalInterfaces() ([]NetworkInterface, error) {
 	}
 
 	netIfaces := netInterfaceMap()
+	addrIfaces := netInterfaceByAddr()
 
 	var result []NetworkInterface
 	for _, dev := range devs {
@@ -72,6 +73,18 @@ func ListPhysicalInterfaces() ([]NetworkInterface, error) {
 			ni.MTU = info.mtu
 		}
 
+		if len(ni.HardwareAddr) == 0 {
+			for _, addr := range ni.Addresses {
+				if info, ok := addrIfaces[addr]; ok && len(info.mac) > 0 {
+					ni.HardwareAddr = info.mac
+					if ni.MTU == 0 {
+						ni.MTU = info.mtu
+					}
+					break
+				}
+			}
+		}
+
 		if len(ni.HardwareAddr) == 0 && len(ni.Addresses) == 0 {
 			continue
 		}
@@ -97,13 +110,36 @@ func netInterfaceMap() map[string]*netIfaceInfo {
 	}
 	m := make(map[string]*netIfaceInfo, len(ifaces))
 	for _, iface := range ifaces {
+		m[iface.Name] = &netIfaceInfo{
+			mac: iface.HardwareAddr,
+			mtu: iface.MTU,
+		}
+	}
+	return m
+}
+
+func netInterfaceByAddr() map[string]*netIfaceInfo {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	byAddr := make(map[string]*netIfaceInfo)
+	for _, iface := range ifaces {
 		info := &netIfaceInfo{
 			mac: iface.HardwareAddr,
 			mtu: iface.MTU,
 		}
-		m[iface.Name] = info
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				byAddr[ipnet.IP.String()] = info
+			}
+		}
 	}
-	return m
+	return byAddr
 }
 
 func InterfaceRunningSet() map[string]bool {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"image/color"
 	"sort"
@@ -18,6 +19,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/google/gopacket"
 )
+
+var errNpcapMissing = errors.New("npcap is not installed")
 
 //go:embed lanwan.jpg
 var lanwanJPG []byte
@@ -43,9 +46,21 @@ func themedSVG(name string, src []byte, c color.Color) *fyne.StaticResource {
 	return res
 }
 
-var ifaceColumnWidths = []float32{40, 80, 160, 60, 300}
-
-var textColumnWidths = ifaceColumnWidths[1:]
+func computeColumnWidths(ifaces []NetworkInterface) []float32 {
+	nameWidth := float32(80)
+	measure := fyne.CurrentApp().Driver().RenderedTextSize
+	for _, iface := range ifaces {
+		size, _ := measure(iface.Label(), theme.TextSize(), fyne.TextStyle{}, nil)
+		w := size.Width + theme.Padding()*2
+		if w > nameWidth {
+			nameWidth = w
+		}
+	}
+	if nameWidth > 250 {
+		nameWidth = 250
+	}
+	return []float32{40, nameWidth, 160, 60, 300}
+}
 
 func ifaceRow(iface NetworkInterface) []string {
 	mac := ""
@@ -59,10 +74,10 @@ func ifaceRow(iface NetworkInterface) []string {
 	return []string{iface.Label(), mac, mtu, strings.Join(iface.Addresses, ", ")}
 }
 
-func ifaceRowContainer(bold bool) (*fyne.Container, []*widget.Label) {
-	labels := make([]*widget.Label, len(ifaceColumnWidths))
-	objects := make([]fyne.CanvasObject, len(ifaceColumnWidths))
-	for i, w := range ifaceColumnWidths {
+func ifaceRowContainer(widths []float32, bold bool) (*fyne.Container, []*widget.Label) {
+	labels := make([]*widget.Label, len(widths))
+	objects := make([]fyne.CanvasObject, len(widths))
+	for i, w := range widths {
 		l := widget.NewLabel("")
 		l.TextStyle.Bold = bold
 		labels[i] = l
@@ -106,7 +121,10 @@ func newIfaceState(ifaces []NetworkInterface) *ifaceState {
 }
 
 func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(NetworkInterface)) fyne.CanvasObject {
-	header, headerLabels := ifaceRowContainer(true)
+	colWidths := computeColumnWidths(state.ifaces)
+	textColWidths := colWidths[1:]
+
+	header, headerLabels := ifaceRowContainer(colWidths, true)
 	for i, text := range []string{"", "Name", "MAC", "MTU", "Addresses"} {
 		headerLabels[i].SetText(text)
 	}
@@ -115,7 +133,7 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 		return theme.Color(theme.ColorNameForeground)
 	}
 
-	iconSize := fyne.NewSize(ifaceColumnWidths[0], 36)
+	iconSize := fyne.NewSize(colWidths[0], 36)
 
 	list := widget.NewList(
 		func() int {
@@ -127,7 +145,7 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 			icon := canvas.NewImageFromResource(themedSVG("ethernet", ethernetSVG, iconColor))
 			icon.FillMode = canvas.ImageFillContain
 			cols := []fyne.CanvasObject{container.NewGridWrap(iconSize, icon)}
-			for _, w := range textColumnWidths {
+			for _, w := range textColWidths {
 				cols = append(cols, container.NewGridWrap(fyne.NewSize(w, 36), container.NewPadded(canvas.NewText("", fgColor()))))
 			}
 			return container.NewHBox(cols...)
@@ -509,6 +527,21 @@ func main() {
 	a.Settings().SetTheme(&appTheme{Theme: a.Settings().Theme()})
 	w := a.NewWindow("Router Freedom")
 	w.Resize(fyne.NewSize(900, 600))
+
+	if err := checkPcapDeps(); err != nil {
+		msg := widget.NewRichText(
+			&widget.TextSegment{Text: "Npcap is required", Style: widget.RichTextStyleHeading},
+			&widget.TextSegment{Text: "This application requires Npcap to capture network traffic.", Style: widget.RichTextStyleParagraph},
+			&widget.TextSegment{Text: "Install it by running:", Style: widget.RichTextStyleParagraph},
+			&widget.TextSegment{Text: "    winget install Npcap.Npcap", Style: widget.RichTextStyleCodeBlock},
+			&widget.TextSegment{Text: "Or download it from https://npcap.com", Style: widget.RichTextStyleParagraph},
+			&widget.TextSegment{Text: "Restart this application after installing.", Style: widget.RichTextStyleParagraph},
+		)
+		msg.Wrapping = fyne.TextWrapWord
+		w.SetContent(container.NewPadded(msg))
+		w.ShowAndRun()
+		return
+	}
 
 	ifaces, err := ListPhysicalInterfaces()
 	if err != nil {
