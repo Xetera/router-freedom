@@ -4,3 +4,10 @@ Many ISPs these days lock the routers they send customers down completely, ship 
 
 <video src="https://github.com/user-attachments/assets/5afe3bb5-cb4a-4ab9-8ac1-bdc84e3438de"></video>
 
+Router Freedom simply listens to packets being sent on the interface a router is connected to, interprets PPPoE packets being sent and sends the right messages the router expects to spill its secrets. More information on my [blog post](https://xetera.dev/article/finding-your-isp-routers-credentials).
+
+If you're on Windows, you will need to manually install npcap from [here](https://npcap.com/#download) as their license does not allow redistribution.
+
+## Usage
+
+`go run .`
