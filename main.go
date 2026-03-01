@@ -263,7 +263,7 @@ func buildLandingPage(ctx context.Context, state *ifaceState, onSelect func(Netw
 			&widget.TextSegment{Text: "Click on the interface and power your router on. It's normal to wait up to 1-2 minutes for the router to come to life"},
 			&widget.TextSegment{Text: "If your router uses PPPoE the MAC address, VLAN configuration and PPPoE username and password should show up"},
 		}},
-		&widget.TextSegment{Text: "If you get a \"router refuses insecure auth\" error, contact me at hi@xetera.dev to see if we can crack the hash. If not, I'm happy to give you a refund if you're willing to share your router model and ISP.", Style: widget.RichTextStyleParagraph},
+		&widget.TextSegment{Text: "If you get a \"router refuses insecure auth\" error, contact me at hi@xetera.dev to see if we can crack the hash.", Style: widget.RichTextStyleParagraph},
 	)
 	instructions.Wrapping = fyne.TextWrapWord
 
