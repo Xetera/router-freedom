@@ -101,6 +101,5 @@ jobs:
 
             ### Changes
             ${{ steps.notes.outputs.notes }}
-          prerelease: true
           make_latest: true
           files: artifacts/*
