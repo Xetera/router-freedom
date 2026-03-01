@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            output: router-freedom-darwin-arm64
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            output: router-freedom-darwin-amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            output: router-freedom-windows-amd64.exe
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            output: router-freedom-linux-amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Linux dependencies
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev libgl1-mesa-dev xorg-dev
+
+      - name: Install Npcap SDK
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\npcap-sdk
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile C:\npcap-sdk\npcap-sdk.zip
+          Expand-Archive -Path C:\npcap-sdk\npcap-sdk.zip -DestinationPath C:\npcap-sdk
+          echo "CGO_CFLAGS=-IC:\npcap-sdk\Include" >> $env:GITHUB_ENV
+          echo "CGO_LDFLAGS=-LC:\npcap-sdk\Lib\x64" >> $env:GITHUB_ENV
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o ${{ matrix.output }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
